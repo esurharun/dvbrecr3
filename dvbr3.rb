@@ -9,6 +9,8 @@ require 'java'
 require 'benchmark'
 require 'FileUtils'
 
+SEPARATOR_ = '\\'
+
 module JavaConcurrent
   include_package 'java.util.concurrent'
 end
@@ -22,7 +24,7 @@ $executor = JavaConcurrent::Executors.new_fixed_thread_pool(6)
 class String
   def to_bool
     return true if self == true || self =~ (/(true|t|yes|y|1)$/i)
-    return false if self == false || self.blank? || self =~ (/(false|f|no|n|0)$/i)
+    return false if self == false ||  self =~ (/(false|f|no|n|0)$/i)
     raise ArgumentError.new("invalid value for Boolean: \"#{self}\"")
   end
 end
@@ -34,12 +36,8 @@ def shutdown
   exit(0)
 end
 
-MENCODER_MPG_CMD = 'mencoder -forceidx -tskeepbroken -oac lavc -ovc lavc -of mpeg -mpegopts format=xvcd \
-    -vf fixpts,scale=352:288 -srate 44100 -af lavcresample=44100 \
-    -lavcopts vcodec=mpeg1video:keyint=15:vrc_buf_size=327:vrc_minrate=1152:vbitrate=1152:vrc_maxrate=1152:acodec=mp2:abitrate=224:aspect=16/9:threads=4:turbo \
-    -ofps 25 -o %s %s 2>&1'
-MENCODER_FLV_CMD = 'mencoder -forceidx -of lavf -oac mp3lame -lameopts abr:br=56 -srate 22050 -ovc lavc \
-    -lavcopts vcodec=flv:vbitrate=250:mbd=2:mv0:trell:v4mv:cbp:last_pred=3 -o %s %s 2>&1'
+MENCODER_MPG_CMD = 'mencoder -forceidx -tskeepbroken -oac lavc -ovc lavc -of mpeg -mpegopts format=xvcd -vf fixpts,scale=352:288 -srate 44100 -af lavcresample=44100 -lavcopts vcodec=mpeg1video:keyint=15:vrc_buf_size=327:vrc_minrate=1152:vbitrate=1152:vrc_maxrate=1152:acodec=mp2:abitrate=224:aspect=16/9:threads=4:turbo -ofps 25 -o %s %s 2>&1'
+MENCODER_FLV_CMD = 'mencoder -forceidx -of lavf -oac mp3lame -lameopts abr:br=56 -srate 22050 -ovc lavc -lavcopts vcodec=flv:vbitrate=250:mbd=2:mv0:trell:v4mv:cbp:last_pred=3 -o %s %s 2>&1'
 
 Signal.trap 'SIGTERM' do
   shutdown
@@ -151,6 +149,7 @@ class Dvbr3
 
       x.report('MPG:') {
 
+	  #puts command
         output = `#{command}`
 
         File.open("#{out_file}.encmpg.log.txt", "w") do |f|
@@ -186,7 +185,7 @@ class Dvbr3
         Dir.foreach(@lookup_path) do |item|
           next if item == '.' or item == '..'
 
-          full_path = "#{@lookup_path}#{File::SEPARATOR}#{item}"
+          full_path = "#{@lookup_path}#{SEPARATOR_}#{item}"
 
           match = item.match(/#{TS_FILE_HEADER}_(\d+)_(\d+)-(\d+).ts$/i)
 
@@ -224,8 +223,8 @@ class Dvbr3
 
               pre_process(full_path)
 
-              mpg_out_path =   "#{@lookup_path}#{File::SEPARATOR}#{out_mpg_fn}"
-              flv_out_path =   "#{@lookup_path}#{File::SEPARATOR}#{out_flv_fn}"
+              mpg_out_path =   "#{@lookup_path}#{SEPARATOR_}#{out_mpg_fn}"
+              flv_out_path =   "#{@lookup_path}#{SEPARATOR_}#{out_flv_fn}"
 
               create_mpg("#{full_path}_remux.ts",mpg_out_path)
 
@@ -243,19 +242,22 @@ class Dvbr3
 
               end
 
-              if File.exist? flv_out_path and File.exist? mpg_out_path
+              if  File.exist? mpg_out_path
 
-                create_metadata_for_flv(flv_out_path)
+			
+		    if File.exist? flv_out_path and @flv_enabled
+                	create_metadata_for_flv(flv_out_path)
 
-                flv_dest_path = "%s#{File::SEPARATOR}%s#{File::SEPARATOR}%s#{File::SEPARATOR}%s#{File::SEPARATOR}" % [@flv_path,st_year,st_month,st_day]
+                	flv_dest_path = "%s#{SEPARATOR_}%s#{SEPARATOR_}%02d#{SEPARATOR_}%02d#{SEPARATOR_}" % [@flv_path,st_year,st_month,st_day]
 
-                FileUtils.mkdir_p flv_dest_path
-                puts "#{@channel_name} : Moving #{flv_out_path}"
+                	FileUtils.mkdir_p flv_dest_path
+		    end
+                puts "#{@channel_name} : Moving #{flv_out_path}" if @flv_enabled
                 Benchmark.bm do |x|
 
                   x.report('MOVE_FLV: ') {
-                    FileUtils.mv(flv_out_path, "#{flv_dest_path}#{File::SEPARATOR}#{out_flv_fn}")
-                    FileUtils.mv(flv_out_path+'.meta', "#{flv_dest_path}#{File::SEPARATOR}#{out_flv_fn}.meta")
+                    FileUtils.mv(flv_out_path, "#{flv_dest_path}#{SEPARATOR_}#{out_flv_fn}") if @flv_enabled
+                    FileUtils.cp(flv_out_path+'.meta', "#{flv_dest_path}#{SEPARATOR_}#{out_flv_fn}.meta") if @flv_enabled
 
 
 
@@ -266,7 +268,7 @@ class Dvbr3
                 Benchmark.bm do |x|
 
                   x.report('MOVE_MPG: ') {
-                    FileUtils.mv(mpg_out_path, "#{@mpg_path}#{File::SEPARATOR}#{out_mpg_fn}")
+                    FileUtils.mv(mpg_out_path, "#{@mpg_path}#{SEPARATOR_}#{out_mpg_fn}")
                   }
                 end
 
@@ -333,6 +335,8 @@ fail_and_shutdown 'Please enter a configuration file name as parameter' unless A
 
 fail_and_shutdown '%s does not exists' % [ARGV[0]] unless File.exist? ARGV[0]
 
+
+puts "Started on #{ARGV[0]}"
 
 dvbr = Dvbr3.new(ARGV[0])
 
