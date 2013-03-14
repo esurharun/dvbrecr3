@@ -1,4 +1,3 @@
-require 'projectx.jar'
 require 'logback-classic-0.9.8.jar'
 require 'logback-core-0.9.8.jar'
 require 'mina-core-1.1.6.jar'
@@ -8,7 +7,30 @@ require 'xercesImpl-2.9.0.jar'
 require 'java'
 require 'benchmark'
 require 'FileUtils'
+require 'jruby'
 
+
+module Timeout
+
+  class TimeoutError < StandardError; end
+
+  def self.timeout(sec, klass=nil)
+    return yield(sec) if sec == nil or sec.zero?
+    thread = Thread.new { yield(sec) }
+
+    if thread.join(sec).nil?
+      java_thread = JRuby.reference(thread)
+      thread.kill
+      java_thread.native_thread.interrupt
+      thread.join(0.15)
+      raise (klass || TimeoutError), 'execution expired'
+    else
+      thread.value
+    end
+  end
+end
+
+include Timeout
 SEPARATOR_ = '\\'
 
 module JavaConcurrent
@@ -24,7 +46,7 @@ $executor = JavaConcurrent::Executors.new_fixed_thread_pool(6)
 class String
   def to_bool
     return true if self == true || self =~ (/(true|t|yes|y|1)$/i)
-    return false if self == false ||  self =~ (/(false|f|no|n|0)$/i)
+    return false if self == false || self =~ (/(false|f|no|n|0)$/i)
     raise ArgumentError.new("invalid value for Boolean: \"#{self}\"")
   end
 end
@@ -36,8 +58,8 @@ def shutdown
   exit(0)
 end
 
-MENCODER_MPG_CMD = 'mencoder -forceidx -tskeepbroken -oac lavc -ovc lavc -of mpeg -mpegopts format=xvcd -vf fixpts,scale=352:288 -srate 44100 -af lavcresample=44100 -lavcopts vcodec=mpeg1video:keyint=15:vrc_buf_size=327:vrc_minrate=1152:vbitrate=1152:vrc_maxrate=1152:acodec=mp2:abitrate=224:aspect=16/9:threads=4:turbo -ofps 25 -o %s %s 2>&1'
-MENCODER_FLV_CMD = 'mencoder -forceidx -of lavf -oac mp3lame -lameopts abr:br=56 -srate 22050 -ovc lavc -lavcopts vcodec=flv:vbitrate=250:mbd=2:mv0:trell:v4mv:cbp:last_pred=3 -o %s %s 2>&1'
+MENCODER_MPG_CMD = 'mencoder -forceidx -tskeepbroken -oac lavc -ovc lavc -of mpeg -mpegopts format=xvcd -vf fixpts,scale=352:288 -srate 44100 -af lavcresample=44100 -lavcopts vcodec=mpeg1video:keyint=15:vrc_buf_size=327:vrc_minrate=1152:vbitrate=1152:vrc_maxrate=1152:acodec=mp2:abitrate=224:aspect=16/9:threads=4:turbo -ofps 25 -o %s %s 2>&1 >> %s'
+MENCODER_FLV_CMD = 'mencoder -forceidx -of lavf -oac mp3lame -lameopts abr:br=56 -srate 22050 -ovc lavc -lavcopts vcodec=flv:vbitrate=250:mbd=2:mv0:trell:v4mv:cbp:last_pred=3 -o %s %s 2>&1 >> %s'
 
 Signal.trap 'SIGTERM' do
   shutdown
@@ -51,7 +73,6 @@ def fail_and_shutdown(message)
 end
 
 class Dvbr3
-
 
 
   def check_config_and_process
@@ -93,6 +114,35 @@ class Dvbr3
 
   end
 
+  TIMEOUT_1_HOUR = 60 * 60
+
+  def run_limited(cmd, timeout)
+
+    begin
+      puts cmd
+      pipe = IO.popen(cmd)
+
+      puts "pid: #{pipe.pid}"
+      Timeout.timeout(timeout) do
+
+
+        Process.wait pipe.pid
+      end
+    rescue Timeout::TimeoutError
+      puts 'Timeout'
+      Process.kill 9, pipe.pid
+      return false
+      # Process.wait pipe.pid # we need to collect status so it doesn't stick around as zombie process
+    rescue Exception => ex
+      puts ex.message
+      return false
+    end
+
+     true
+
+
+  end
+
   def create_metadata_for_flv(in_file)
 
     puts "#{@channel_name} (FLV_MD) : Generating metadata for #{in_file}"
@@ -116,54 +166,61 @@ class Dvbr3
     puts "#{@channel_name} (FLV_MD) : Finished generating metadata for #{in_file}"
   end
 
-  def create_flv(in_file,out_file)
+  def create_flv(in_file, out_file)
+
+    @ret = false
+
 
     puts "#{@channel_name} (FLV) : Started encoding #{in_file} to #{out_file}"
 
-    command = MENCODER_FLV_CMD % [out_file, in_file]
+    command = MENCODER_FLV_CMD % [out_file, in_file, "#{out_file}.flvenc.log.txt"]
 
     Benchmark.bm do |x|
 
       x.report('FLV:') {
 
-        output = `#{command}`
+        @ret = run_limited(command, TIMEOUT_1_HOUR)
 
-        File.open("#{out_file}.encflv.log.txt", "w") do |f|
-          f.write output
-       end
+
       }
     end
 
     puts "#{@channel_name} (FLV) : Finished encoding #{in_file} to #{out_file}"
 
+    @ret
+
   end
 
 
-  def create_mpg(in_file,out_file)
+  def create_mpg(in_file, out_file)
+
+    @ret = false
+
 
     puts "#{@channel_name} (MPG) : Encoding #{in_file} to #{out_file}"
 
-    command = MENCODER_MPG_CMD % [out_file, in_file]
+    command = MENCODER_MPG_CMD % [out_file, in_file, "#{out_file}.encmpg.log.txt"]
 
     Benchmark.bm do |x|
 
       x.report('MPG:') {
 
-	  #puts command
-        output = `#{command}`
+        @ret = run_limited(command, TIMEOUT_1_HOUR)
 
-        File.open("#{out_file}.encmpg.log.txt", "w") do |f|
-          f.write output
-        end
+
       }
     end
 
 
     puts "#{@channel_name} (MPG) : Finished encoding #{in_file} to #{out_file}"
 
+    @ret
+
   end
 
   def pre_process(in_file)
+
+    @ret = false
 
     puts "#{@channel_name} : Preprocessing #{in_file}"
 
@@ -171,9 +228,21 @@ class Dvbr3
 
       x.report('PRE: ') {
 
-        `java -jar projectx.jar -tots -id #{@audio_pid},#{@video_pid} #{in_file}`
+        @ret = run_limited("java -jar projectx.jar -tots -id #{@audio_pid},#{@video_pid} #{in_file} 2>&1 >> #{in_file}.pre.log.txt ", TIMEOUT_1_HOUR)
+
       }
 
+    end
+
+    @ret
+
+  end
+
+  def ignore_file(file_name)
+    begin
+      FileUtils.mv file_name, "#{file_name}.ignored"
+    rescue Exception => e
+      puts e.message
     end
 
   end
@@ -209,78 +278,93 @@ class Dvbr3
               out_fn_body = '-%s%02d%02d_%02d%02d%02d-%02d%02d%02d' %
                   [st_year,
                    st_month,
-                  st_day,
-                  calendar_st.get(JavaUTIL::Calendar::HOUR_OF_DAY),
-                  calendar_st.get(JavaUTIL::Calendar::MINUTE),
-                  calendar_st.get(JavaUTIL::Calendar::SECOND),
-                  calendar_en.get(JavaUTIL::Calendar::HOUR_OF_DAY),
-                  calendar_en.get(JavaUTIL::Calendar::MINUTE),
-                  calendar_en.get(JavaUTIL::Calendar::SECOND)
-									]
+                   st_day,
+                   calendar_st.get(JavaUTIL::Calendar::HOUR_OF_DAY),
+                   calendar_st.get(JavaUTIL::Calendar::MINUTE),
+                   calendar_st.get(JavaUTIL::Calendar::SECOND),
+                   calendar_en.get(JavaUTIL::Calendar::HOUR_OF_DAY),
+                   calendar_en.get(JavaUTIL::Calendar::MINUTE),
+                   calendar_en.get(JavaUTIL::Calendar::SECOND)
+                  ]
 
               out_mpg_fn = "CH%s#{out_fn_body}.mpg" % [c_tuner_id]
               out_flv_fn = "%s#{out_fn_body}.flv" % [@channel_name]
 
-              pre_process(full_path)
+              unless pre_process(full_path)
+                ignore_file(full_path)
+                next
+              end
 
-              mpg_out_path =   "#{@lookup_path}#{SEPARATOR_}#{out_mpg_fn}"
-              flv_out_path =   "#{@lookup_path}#{SEPARATOR_}#{out_flv_fn}"
+              mpg_out_path = "#{@lookup_path}#{SEPARATOR_}#{out_mpg_fn}"
+              flv_out_path = "#{@lookup_path}#{SEPARATOR_}#{out_flv_fn}"
 
-              create_mpg("#{full_path}_remux.ts",mpg_out_path)
+              unless create_mpg("#{full_path}_remux.ts", mpg_out_path)
+                ignore_file full_path
+                next
+              end
+
+
 
               if @flv_enabled
 
-                  if File.exist?(mpg_out_path)
-                    create_flv(mpg_out_path, flv_out_path)
-
-
-
-                  else
-                    puts "#{@channel_name} : FATAL ERROR #{mpg_out_path} could not found!!!"
+                if File.exist?(mpg_out_path)
+                  unless create_flv(mpg_out_path, flv_out_path)
+                    ignore_file full_path
+                    next
                   end
+
+
+                else
+                  puts "#{@channel_name} : FATAL ERROR #{mpg_out_path} could not found!!!"
+                end
 
 
               end
 
               if  File.exist? mpg_out_path
 
-			
-		    if File.exist? flv_out_path and @flv_enabled
-                	create_metadata_for_flv(flv_out_path)
 
-                	flv_dest_path = "%s#{SEPARATOR_}%s#{SEPARATOR_}%02d#{SEPARATOR_}%02d#{SEPARATOR_}" % [@flv_path,st_year,st_month,st_day]
+                if File.exist? flv_out_path and @flv_enabled
 
-                	FileUtils.mkdir_p flv_dest_path
-		    end
-                puts "#{@channel_name} : Moving #{flv_out_path}" if @flv_enabled
-                Benchmark.bm do |x|
+                  create_metadata_for_flv(flv_out_path)
 
-                  x.report('MOVE_FLV: ') {
-                    FileUtils.mv(flv_out_path, "#{flv_dest_path}#{SEPARATOR_}#{out_flv_fn}") if @flv_enabled
-                    FileUtils.cp(flv_out_path+'.meta', "#{flv_dest_path}#{SEPARATOR_}#{out_flv_fn}.meta") if @flv_enabled
+                  flv_dest_path = "%s#{SEPARATOR_}%s#{SEPARATOR_}%02d#{SEPARATOR_}%02d#{SEPARATOR_}" % [@flv_path, st_year, st_month, st_day]
 
-
-
-                  }
+                  FileUtils.mkdir_p flv_dest_path
                 end
 
-                puts "#{@channel_name} : Moving #{mpg_out_path}"
-                Benchmark.bm do |x|
+                begin
+                  puts "#{@channel_name} : Moving #{flv_out_path}" if @flv_enabled
+                  Benchmark.bm do |x|
 
-                  x.report('MOVE_MPG: ') {
-                    FileUtils.mv(mpg_out_path, "#{@mpg_path}#{SEPARATOR_}#{out_mpg_fn}")
-                  }
+                    x.report('MOVE_FLV: ') {
+                      FileUtils.mv(flv_out_path, "#{flv_dest_path}#{SEPARATOR_}#{out_flv_fn}") if @flv_enabled
+                      FileUtils.cp(flv_out_path+'.meta', "#{flv_dest_path}#{SEPARATOR_}#{out_flv_fn}.meta") if @flv_enabled
+
+
+                    }
+                  end
+
+                  puts "#{@channel_name} : Moving #{mpg_out_path}"
+                  Benchmark.bm do |x|
+
+                    x.report('MOVE_MPG: ') {
+                      FileUtils.mv(mpg_out_path, "#{@mpg_path}#{SEPARATOR_}#{out_mpg_fn}")
+                    }
+                  end
+
+
+                  puts "#{@channel_name} : Removing #{full_path}"
+                  File.delete full_path
+
+                  puts "#{@channel_name} : Removing #{full_path}_remux.ts"
+                  File.delete "#{full_path}_remux.ts"
+
+
+                rescue Exception => ex
+                  puts 'An error occurred'
+
                 end
-
-
-
-                puts "#{@channel_name} : Removing #{full_path}"
-                File.delete full_path
-
-                puts "#{@channel_name} : Removing #{full_path}_remux.ts"
-                File.delete "#{full_path}_remux.ts"
-
-
 
 
               end
@@ -289,14 +373,11 @@ class Dvbr3
             end
 
 
-
           end
 
 
+          sleep 1.0
         end
-
-
-        sleep 1.0
       end
     end
   end
@@ -339,8 +420,6 @@ fail_and_shutdown '%s does not exists' % [ARGV[0]] unless File.exist? ARGV[0]
 puts "Started on #{ARGV[0]}"
 
 dvbr = Dvbr3.new(ARGV[0])
-
-
 
 
 #start = Java::NetSourceforgeDvbProjectxCommon::Start
