@@ -2,7 +2,7 @@ import java.io.*;
 import org.red5.io.flv.impl.*;
 import org.red5.io.*;
 
-class MetaGenerate {
+public class MetaGenerate {
 
 
     public static void main(String args[]) throws Exception {
