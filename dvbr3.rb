@@ -1,47 +1,10 @@
-require 'logback-classic-0.9.8.jar'
-require 'logback-core-0.9.8.jar'
-require 'mina-core-1.1.6.jar'
-require 'red5.jar'
-require 'slf4j-api-1.4.3.jar'
-require 'xercesImpl-2.9.0.jar'
-require 'java'
 require 'benchmark'
 require 'FileUtils'
-require 'jruby'
+require 'timeout'
 
 
-module Timeout
+SEPARATOR_ = File::ALT_SEPARATOR || File::SEPARATOR
 
-  class TimeoutError < StandardError; end
-
-  def self.timeout(sec, klass=nil)
-    return yield(sec) if sec == nil or sec.zero?
-    thread = Thread.new { yield(sec) }
-
-    if thread.join(sec).nil?
-      java_thread = JRuby.reference(thread)
-      thread.kill
-      java_thread.native_thread.interrupt
-      thread.join(0.15)
-      raise (klass || TimeoutError), 'execution expired'
-    else
-      thread.value
-    end
-  end
-end
-
-include Timeout
-SEPARATOR_ = '\\'
-
-module JavaConcurrent
-  include_package 'java.util.concurrent'
-end
-
-module JavaUTIL
-  include_package 'java.util'
-end
-
-$executor = JavaConcurrent::Executors.new_fixed_thread_pool(6)
 
 class String
   def to_bool
@@ -54,7 +17,6 @@ end
 
 def shutdown
   puts 'Shutting down..'
-  $executor.shutdown
   exit(0)
 end
 
@@ -131,14 +93,14 @@ class Dvbr3
     rescue Timeout::TimeoutError
       puts 'Timeout'
       Process.kill 9, pipe.pid
+      Process.wait pipe.pid # we need to collect status so it doesn't stick around as zombie process
       return false
-      # Process.wait pipe.pid # we need to collect status so it doesn't stick around as zombie process
     rescue Exception => ex
       puts ex.message
       return false
     end
 
-     true
+    true
 
 
   end
@@ -151,14 +113,7 @@ class Dvbr3
 
       x.report('FLV_MD:') {
 
-        file = Java::JavaIo::File.new(in_file)
-
-        flvReader = Java::OrgRed5IoFlvImpl::FLVReader.new(file)
-
-        metaCache = Java::OrgRed5Io::FileKeyFrameMetaCache.new
-
-        metaCache.saveKeyFrameMeta(file, flvReader.analyzeKeyFrames())
-        flvReader.close()
+        run_limited("java -cp .:logback-classic-0.9.8.jar:logback-core-0.9.8.jar:mina-core-1.1.6.jar:red5.jar:slf4j-api-1.4.3.jar:xercesImpl-2.9.0.jar MetaGenerate #{in_file}", 60 * 10)
       }
     end
 
@@ -248,124 +203,116 @@ class Dvbr3
   end
 
   def run
-    $executor.execute do
-      while true
+    while true
 
-        Dir.foreach(@lookup_path) do |item|
-          next if item == '.' or item == '..'
+      Dir.foreach(@lookup_path) do |item|
+        next if item == '.' or item == '..'
 
-          full_path = "#{@lookup_path}#{SEPARATOR_}#{item}"
+        full_path = "#{@lookup_path}#{SEPARATOR_}#{item}"
 
-          match = item.match(/#{TS_FILE_HEADER}_(\d+)_(\d+)-(\d+).ts$/i)
+        match = item.match(/#{TS_FILE_HEADER}_(\d+)_(\d+)-(\d+).ts$/i)
 
-          if match
-            c_tuner_id = "#{match.captures[0]}".to_i
-            c_start_time = "#{match.captures[1]}".to_i
-            c_stop_time = "#{match.captures[2]}".to_i
+        if match
+          c_tuner_id = "#{match.captures[0]}".to_i
+          c_start_time = "#{match.captures[1]}".to_i
+          c_stop_time = "#{match.captures[2]}".to_i
 
-            if c_tuner_id == @tuner_id
+          if c_tuner_id == @tuner_id
 
-              calendar_st = JavaUTIL::Calendar.getInstance()
-              calendar_st.setTimeInMillis(c_start_time)
+            calendar_st = Time.at(c_start_time / 1000)
 
-              calendar_en = JavaUTIL::Calendar.getInstance()
-              calendar_en.setTimeInMillis(c_stop_time)
+            calendar_en = Time.at(c_stop_time / 1000)
 
-              st_year = calendar_st.get(JavaUTIL::Calendar::YEAR)
-              st_month = calendar_st.get(JavaUTIL::Calendar::MONTH)+1
-              st_day = calendar_st.get(JavaUTIL::Calendar::DAY_OF_MONTH)
+            st_year = calendar_st.strftime('%Y')
+            st_month = calendar_st.strftime('%m')
+            st_day = calendar_st.strftime('%d')
 
-              out_fn_body = '-%s%02d%02d_%02d%02d%02d-%02d%02d%02d' %
-                  [st_year,
-                   st_month,
-                   st_day,
-                   calendar_st.get(JavaUTIL::Calendar::HOUR_OF_DAY),
-                   calendar_st.get(JavaUTIL::Calendar::MINUTE),
-                   calendar_st.get(JavaUTIL::Calendar::SECOND),
-                   calendar_en.get(JavaUTIL::Calendar::HOUR_OF_DAY),
-                   calendar_en.get(JavaUTIL::Calendar::MINUTE),
-                   calendar_en.get(JavaUTIL::Calendar::SECOND)
-                  ]
+            out_fn_body = '-%s%02d%02d_%02d%02d%02d-%02d%02d%02d' %
+                [st_year,
+                 st_month,
+                 st_day,
+                 calendar_st.strftime('%H'),
+                 calendar_st.strftime('%M'),
+                 calendar_st.strftime('%S'),
+                 calendar_en.strftime('%H'),
+                 calendar_en.strftime('%M'),
+                 calendar_en.strftime('%S')                ]
 
-              out_mpg_fn = "CH%s#{out_fn_body}.mpg" % [c_tuner_id]
-              out_flv_fn = "%s#{out_fn_body}.flv" % [@channel_name]
+            out_mpg_fn = "CH%s#{out_fn_body}.mpg" % [c_tuner_id]
+            out_flv_fn = "%s#{out_fn_body}.flv" % [@channel_name]
 
-              unless pre_process(full_path)
-                ignore_file(full_path)
-                next
-              end
+            unless pre_process(full_path)
+              ignore_file(full_path)
+              next
+            end
 
-              mpg_out_path = "#{@lookup_path}#{SEPARATOR_}#{out_mpg_fn}"
-              flv_out_path = "#{@lookup_path}#{SEPARATOR_}#{out_flv_fn}"
+            mpg_out_path = "#{@lookup_path}#{SEPARATOR_}#{out_mpg_fn}"
+            flv_out_path = "#{@lookup_path}#{SEPARATOR_}#{out_flv_fn}"
 
-              unless create_mpg("#{full_path}_remux.ts", mpg_out_path)
-                ignore_file full_path
-                next
-              end
+            unless create_mpg("#{full_path}_remux.ts", mpg_out_path)
+              ignore_file full_path
+              next
+            end
 
 
+            if @flv_enabled
 
-              if @flv_enabled
-
-                if File.exist?(mpg_out_path)
-                  unless create_flv(mpg_out_path, flv_out_path)
-                    ignore_file full_path
-                    next
-                  end
-
-
-                else
-                  puts "#{@channel_name} : FATAL ERROR #{mpg_out_path} could not found!!!"
+              if File.exist?(mpg_out_path)
+                unless create_flv(mpg_out_path, flv_out_path)
+                  ignore_file full_path
+                  next
                 end
 
 
+              else
+                puts "#{@channel_name} : FATAL ERROR #{mpg_out_path} could not found!!!"
               end
 
-              if  File.exist? mpg_out_path
+
+            end
+
+            if  File.exist? mpg_out_path
 
 
-                if File.exist? flv_out_path and @flv_enabled
+              if File.exist? flv_out_path and @flv_enabled
 
-                  create_metadata_for_flv(flv_out_path)
+                create_metadata_for_flv(flv_out_path)
 
-                  flv_dest_path = "%s#{SEPARATOR_}%s#{SEPARATOR_}%02d#{SEPARATOR_}%02d#{SEPARATOR_}" % [@flv_path, st_year, st_month, st_day]
+                flv_dest_path = "%s#{SEPARATOR_}%s#{SEPARATOR_}%02d#{SEPARATOR_}%02d#{SEPARATOR_}" % [@flv_path, st_year, st_month, st_day]
 
-                  FileUtils.mkdir_p flv_dest_path
+                FileUtils.mkdir_p flv_dest_path
+              end
+
+              begin
+                puts "#{@channel_name} : Moving #{flv_out_path}" if @flv_enabled
+                Benchmark.bm do |x|
+
+                  x.report('MOVE_FLV: ') {
+                    FileUtils.mv(flv_out_path, "#{flv_dest_path}#{SEPARATOR_}#{out_flv_fn}") if @flv_enabled
+                    FileUtils.cp(flv_out_path+'.meta', "#{flv_dest_path}#{SEPARATOR_}#{out_flv_fn}.meta") if @flv_enabled
+
+
+                  }
                 end
 
-                begin
-                  puts "#{@channel_name} : Moving #{flv_out_path}" if @flv_enabled
-                  Benchmark.bm do |x|
+                puts "#{@channel_name} : Moving #{mpg_out_path}"
+                Benchmark.bm do |x|
 
-                    x.report('MOVE_FLV: ') {
-                      FileUtils.mv(flv_out_path, "#{flv_dest_path}#{SEPARATOR_}#{out_flv_fn}") if @flv_enabled
-                      FileUtils.cp(flv_out_path+'.meta', "#{flv_dest_path}#{SEPARATOR_}#{out_flv_fn}.meta") if @flv_enabled
-
-
-                    }
-                  end
-
-                  puts "#{@channel_name} : Moving #{mpg_out_path}"
-                  Benchmark.bm do |x|
-
-                    x.report('MOVE_MPG: ') {
-                      FileUtils.mv(mpg_out_path, "#{@mpg_path}#{SEPARATOR_}#{out_mpg_fn}")
-                    }
-                  end
-
-
-                  puts "#{@channel_name} : Removing #{full_path}"
-                  File.delete full_path
-
-                  puts "#{@channel_name} : Removing #{full_path}_remux.ts"
-                  File.delete "#{full_path}_remux.ts"
-
-
-                rescue Exception => ex
-                  puts 'An error occurred'
-
+                  x.report('MOVE_MPG: ') {
+                    FileUtils.mv(mpg_out_path, "#{@mpg_path}#{SEPARATOR_}#{out_mpg_fn}")
+                  }
                 end
 
+
+                puts "#{@channel_name} : Removing #{full_path}"
+                File.delete full_path
+
+                puts "#{@channel_name} : Removing #{full_path}_remux.ts"
+                File.delete "#{full_path}_remux.ts"
+
+
+              rescue Exception => ex
+                puts 'An error occurred'
 
               end
 
@@ -376,9 +323,12 @@ class Dvbr3
           end
 
 
-          sleep 1.0
         end
+
+
+
       end
+      sleep 1.0
     end
   end
 

@@ -1,3 +1,3 @@
 :loop
-jruby --1.9 dvbr3.rb %*
+ruby dvbr3.rb %*
 goto loop
